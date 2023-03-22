@@ -71,7 +71,7 @@ jobs:
           reason.
         type: string
       ensure-test-tool:
-        default: true
+        default: false
         description: >
           If true, a step will be ran to ensure the configured test tool is
           installed.
