@@ -246,6 +246,7 @@ jobs:
             - run:
                 command: |
                   set -e
+                  pytest --collect-only
                   TEST_FILES=$(pytest --collect-only -q | grep -e "\.py" | circleci tests split --split-by=timings)
                   mkdir -p test-results
                   pytest --verbose --junitxml=test-reports/report.xml $TEST_FILES
