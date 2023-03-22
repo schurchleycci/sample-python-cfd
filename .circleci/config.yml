@@ -355,7 +355,8 @@ jobs:
                 steps:
                   - run:
                       command: >-
-                         pytest --collect-only -q | grep -e "\.py" | circleci tests run  --command="xargs pytest --junitxml=test-results/junit.xml -v --" --split-by=timings --test-results-path="test-report"
+                        TEST_FILES=$(pytest --collect-only -q | grep -e "\.py" | circleci tests split --split-by=timings)
+                        pytest --verbose --junitxml=test-report/report.xml $TEST_FILES
                       environment:
                         PYTHONPATH: << parameters.app-dir >>/<< parameters.module-src-dir >>
                       name: Run tests with global python env
