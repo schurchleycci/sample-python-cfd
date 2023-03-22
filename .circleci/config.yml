@@ -51,7 +51,7 @@ jobs:
     executor:
       name: default
       tag: << parameters.version >>
-    parallelism: 4
+    # parallelism: 4
     parameters:
       app-dir:
         default: ~/project
@@ -355,7 +355,7 @@ jobs:
                 steps:
                   - run:
                       command: >-
-                         pytest --collect-only -q | grep -e "\.py" | circleci tests run  --command="xargs pytest --junitxml=test-results/junit.xml -v --" --split-by=timings --test-results-path="test-report"
+                         pytest --collect-only -q | grep -e "\.py" | circleci tests run  --command="xargs pytest --junitxml=test-results/junit.xml -v --" --test-results-path="test-report"
                       environment:
                         PYTHONPATH: << parameters.app-dir >>/<< parameters.module-src-dir >>
                       name: Run tests with global python env
