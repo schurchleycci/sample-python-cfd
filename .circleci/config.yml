@@ -244,21 +244,11 @@ jobs:
                 name: Create test-report directory
                 working_directory: <<parameters.app-dir>>
             - run:
-                command: |-
-                  # shellcheck source=detect-env.sh
-                  source "$AUTO_DETECT_ENV_SCRIPT"
-
-                  if [ "${PARAM_TEST_TOOL}" = "pytest" ]; then
-                      INSTALL_COMMAND="pytest --junit-xml=test-report/report.xml ${PARAM_TEST_TOOL_ARGS}"
-                  else
-                      INSTALL_COMMAND="python -m unittest ${PARAM_TEST_TOOL_ARGS}"
-                  fi
-
-                  if [ -n "${PYTHON_ENV_TOOL}" ]; then
-                      eval "${PYTHON_ENV_TOOL} run ${INSTALL_COMMAND}"
-                  else
-                      eval "${INSTALL_COMMAND}"
-                  fi
+                command: |
+                  set -e
+                  TEST_FILES=$(circleci tests glob "openapi_server/**/test_*.py" | circleci tests split --split-by=timings)
+                  mkdir -p test-results
+                  pytest --verbose --junitxml=test-reports/report.xml $TEST_FILES
                 environment:
                   PARAM_PKG_MNGR: <<parameters.pkg-manager>>
                   PARAM_TEST_TOOL: <<parameters.test-tool>>
