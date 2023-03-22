@@ -12,7 +12,7 @@ workflows:
     # Inside the workflow, you define the jobs you want to run.
     # For more details on extending your workflow, see the configuration docs: https://circleci.com/docs/2.0/configuration-reference/#workflows
     jobs:
-      - build-and-test
+      - test-job
 
 
 jobs:
@@ -39,3 +39,770 @@ jobs:
           name: Run tests
           # This assumes pytest is installed via the install-package step above
           command: pytest
+  test-job:        
+    description: >
+      Simple drop-in job to setup a python project, run tests and store the test
+      results if possible.
+
+      If test-tool is pytest, the job assumes the project defines pytest in the
+      dependency file.
+
+      Otherwise, use the built in unittest module as the test-tool.
+    executor:
+      name: default
+      tag: << parameters.version >>
+    parameters:
+      app-dir:
+        default: ~/project
+        description: >-
+          Path to the directory containing your python project. Not needed if
+          dependency file lives in the root.
+        type: string
+      args:
+        default: ''
+        description: >-
+          Arguments to pass to install command for pipenv and poetry. Override '-r
+          requirements.txt' for pip.
+        type: string
+      cache-version:
+        default: v1
+        description: >-
+          Change the default cache version if you need to clear the cache for any
+          reason.
+        type: string
+      ensure-test-tool:
+        default: true
+        description: >
+          If true, a step will be ran to ensure the configured test tool is
+          installed.
+        type: boolean
+      fail-if-missing-tool:
+        default: false
+        description: >
+          If true, this job will fail if the test tool was not found. If false, it
+          will automatically install to recover.
+        type: boolean
+      include-branch-in-cache-key:
+        default: true
+        description: |
+          If true, this cache bucket will only apply to jobs within the same branch.
+        type: boolean
+      include-python-in-cache-key:
+        default: true
+        description: >
+          If true, this cache bucket will checksum the pyenv python version with the
+          cache-key
+        type: boolean
+      module-src-dir:
+        default: src
+        description: Path relative to app-dir which contains module source.
+        type: string
+      pip-dependency-file:
+        default: requirements.txt
+        description: >-
+          Name of the requirements file that needs to be installed with pip.
+          Prepended with `app-dir`. If using pipenv or poetry, this is ignored.
+        type: string
+      pkg-manager:
+        default: auto
+        description: Select the package manager to use. Default is pip
+        enum:
+          - auto
+          - pip
+          - pipenv
+          - poetry
+          - pip-dist
+        type: enum
+      pypi-cache:
+        default: true
+        description: >-
+          Keep all versions of pypi and site-package caches for faster rebuilding
+          overall.
+        type: boolean
+      setup-file-path:
+        default: ''
+        description: Path to the setup.py file.
+        type: string
+      test-tool:
+        default: pytest
+        description: The tool to run the tests with.
+        enum:
+          - pytest
+          - unittest
+        type: enum
+      test-tool-args:
+        default: ''
+        description: >-
+          Arguments to pass to test tool, i.e. discovery settings for unittest -
+          'discover -s tests_dir'.
+        type: string
+      venv-cache:
+        default: true
+        description: >-
+          Use the lockfile to cache the virtualenv. Not used with pip as
+          pkg-manager.
+        type: boolean
+      version:
+        default: '3.8'
+        description: >
+          A full version tag must be specified. Example: "3.8"
+
+          For a full list of releases, see the following:
+          https://hub.docker.com/r/cimg/python
+        type: string
+    steps:
+      - checkout
+      - install-packages:
+          app-dir: <<parameters.app-dir>>
+          args: <<parameters.args>>
+          cache-version: <<parameters.cache-version>>
+          include-branch-in-cache-key: <<parameters.include-branch-in-cache-key>>
+          include-python-in-cache-key: <<parameters.include-python-in-cache-key>>
+          pip-dependency-file: <<parameters.pip-dependency-file>>
+          pkg-manager: <<parameters.pkg-manager>>
+          pypi-cache: <<parameters.pypi-cache>>
+          venv-cache: <<parameters.venv-cache>>
+      - when:
+          condition: <<parameters.ensure-test-tool>>
+          steps:
+            - run:
+                command: >-
+                  # shellcheck source=detect-env.sh
+
+                  source "$AUTO_DETECT_ENV_SCRIPT"
+
+
+                  case ${DETECT_PKG_MNGR:-${PARAM_PKG_MNGR}} in
+                      pip)
+                          REQUIREMENTS_PATH=${PARAM_REQUIREMENTS_PATH:-requirements.txt}
+                      ;;
+                      pip-dist)
+                          REQUIREMENTS_PATH="requirements.txt"
+                      ;;
+                      pipenv) # TODO: use PIPENV_PIPFILE
+                          REQUIREMENTS_PATH="Pipfile"
+                          PYTHON_ENV_TOOL="pipenv"
+                      ;;
+                      poetry)
+                          PYTHON_INSTALL_ARGS="--no-ansi"
+                          REQUIREMENTS_PATH="pyproject.toml"
+                          PYTHON_ENV_TOOL="poetry"
+                      ;;
+                  esac
+
+
+                  if [ -f ${REQUIREMENTS_PATH} ]; then
+                      echo "INFO: Detected dependency file: $REQUIREMENTS_PATH"
+                  else
+                      echo "WARNING: No dependency file for ${DETECT_PKG_MNGR:-${PARAM_PKG_MNGR}} found. ${REQUIREMENTS_PATH} expected."
+                  fi
+
+
+                  # Automatically install test package. unittest is preinstalled and
+                  not required.
+
+                  if [ "${PARAM_TEST_TOOL}" != "unittest" ]; then
+                      DETECT_TEST_TOOL=$(eval "${PYTHON_ENV_TOOL:+$PYTHON_ENV_TOOL run} pip --disable-pip-version-check list" |
+                      awk 'NR > 2 && NF > 0 { print $1 }' | grep "^${PARAM_TEST_TOOL}$")
+                      
+                      NOT_DETECTED=$?
+                      
+                      if (( NOT_DETECTED > 0 )) && [ "${PARAM_FAIL_IF_MISSING_TOOL}" = true ]; then
+                          exit $NOT_DETECTED
+                      fi
+                      
+                      # If the test package is not detected, install using PYTHON_INSTALL_TOOL
+                      if [ -z "$DETECT_TEST_TOOL" ]; then
+                          echo "INFO: Test package ${PARAM_TEST_TOOL} was not found. Installing..."
+                          eval "${PYTHON_ENV_TOOL:-pip} install ${PYTHON_INSTALL_ARGS} ${PARAM_TEST_TOOL}"
+                          INSTALL_RESULT=$?
+                      else
+                          echo "INFO: Detected test package: $DETECT_TEST_TOOL"
+                      fi
+                      
+                      # Exit with test package install result, or exit 0 if param fail is set to false
+                      if (( NOT_DETECTED > 0 )) && [ "${PARAM_FAIL_IF_MISSING_TOOL}" = false ]; then
+                          exit ${INSTALL_RESULT:-0}
+                      fi
+                  fi
+                environment:
+                  PARAM_FAIL_IF_MISSING_TOOL: <<parameters.fail-if-missing-tool>>>
+                  PARAM_PKG_MNGR: <<parameters.pkg-manager>>
+                  PARAM_SETUP_FILE_PATH: <<parameters.setup-file-path>>>
+                  PARAM_TEST_TOOL: <<parameters.test-tool>>
+                name: Ensuring test tool is installed
+                working_directory: <<parameters.app-dir>>
+      - when:
+          condition:
+            equal:
+              - auto
+              - << parameters.pkg-manager >>
+          steps:
+            - run:
+                command: mkdir test-report
+                name: Create test-report directory
+                working_directory: <<parameters.app-dir>>
+            - run:
+                command: |-
+                  # shellcheck source=detect-env.sh
+                  source "$AUTO_DETECT_ENV_SCRIPT"
+
+                  if [ "${PARAM_TEST_TOOL}" = "pytest" ]; then
+                      INSTALL_COMMAND="pytest --junit-xml=test-report/report.xml ${PARAM_TEST_TOOL_ARGS}"
+                  else
+                      INSTALL_COMMAND="python -m unittest ${PARAM_TEST_TOOL_ARGS}"
+                  fi
+
+                  if [ -n "${PYTHON_ENV_TOOL}" ]; then
+                      eval "${PYTHON_ENV_TOOL} run ${INSTALL_COMMAND}"
+                  else
+                      eval "${INSTALL_COMMAND}"
+                  fi
+                environment:
+                  PARAM_PKG_MNGR: <<parameters.pkg-manager>>
+                  PARAM_TEST_TOOL: <<parameters.test-tool>>
+                  PARAM_TEST_TOOL_ARGS: <<parameters.test-tool-args>>
+                  PYTHONPATH: << parameters.app-dir >>/<< parameters.module-src-dir >>
+                name: Run tests with auto-detected packages run
+                working_directory: <<parameters.app-dir>>
+            - store_test_results:
+                path: >-
+                  <<#parameters.app-dir>><<parameters.app-dir>>/<</parameters.app-dir>>test-report
+      - when:
+          condition:
+            and:
+              - equal:
+                  - unittest
+                  - << parameters.test-tool >>
+              - not:
+                  equal:
+                    - auto
+                    - << parameters.pkg-manager >>
+          steps:
+            - when:
+                condition:
+                  or:
+                    - equal:
+                        - poetry
+                        - << parameters.pkg-manager >>
+                    - equal:
+                        - pipenv
+                        - << parameters.pkg-manager >>
+                steps:
+                  - run:
+                      command: >-
+                        <<parameters.pkg-manager>> run python -m unittest <<
+                        parameters.test-tool-args >>
+                      name: Run tests with <<parameters.pkg-manager>> run
+            - when:
+                condition:
+                  or:
+                    - equal:
+                        - pip
+                        - << parameters.pkg-manager >>
+                    - equal:
+                        - pip-dist
+                        - << parameters.pkg-manager >>
+                steps:
+                  - run:
+                      command: python -m unittest << parameters.test-tool-args >>
+                      environment:
+                        PYTHONPATH: << parameters.app-dir >>/<< parameters.module-src-dir >>
+                      name: Run tests with global python env
+                      working_directory: <<parameters.app-dir>>
+      - when:
+          condition:
+            and:
+              - equal:
+                  - pytest
+                  - << parameters.test-tool >>
+              - not:
+                  equal:
+                    - auto
+                    - << parameters.pkg-manager >>
+          steps:
+            - run:
+                command: mkdir test-report
+                name: Create test-report directory
+                working_directory: <<parameters.app-dir>>
+            - when:
+                condition:
+                  or:
+                    - equal:
+                        - poetry
+                        - << parameters.pkg-manager >>
+                    - equal:
+                        - pipenv
+                        - << parameters.pkg-manager >>
+                steps:
+                  - run:
+                      command: >-
+                        <<parameters.pkg-manager>> run pytest
+                        --junit-xml=test-report/report.xml <<
+                        parameters.test-tool-args >>
+                      name: Run tests with <<parameters.pkg-manager>> run
+                      working_directory: <<parameters.app-dir>>
+            - when:
+                condition:
+                  or:
+                    - equal:
+                        - pip
+                        - << parameters.pkg-manager >>
+                    - equal:
+                        - pip-dist
+                        - << parameters.pkg-manager >>
+                steps:
+                  - run:
+                      command: >-
+                        pytest --junit-xml=test-report/report.xml <<
+                        parameters.test-tool-args >>
+                      environment:
+                        PYTHONPATH: << parameters.app-dir >>/<< parameters.module-src-dir >>
+                      name: Run tests with global python env
+                      working_directory: <<parameters.app-dir>>
+            - store_test_results:
+                path: >-
+                  <<#parameters.app-dir>><<parameters.app-dir>>/<</parameters.app-dir>>test-report
+
+commands:
+  install-packages:
+    parameters:
+      app-dir:
+        default: .
+        description: >-
+          Path to the directory containing your python project. Not needed if
+          dependency file lives in the root.
+        type: string
+      args:
+        default: ''
+        description: >
+          Arguments to pass to install command for pipenv and poetry. For pip,
+          arguments are after the command, `pip install -r requirements.txt <args>`.
+
+          For poetry, args are after `--no-ansi` as output option.
+        type: string
+      cache-version:
+        default: v1
+        description: >-
+          Change the default cache version if you need to clear the cache for any
+          reason.
+        type: string
+      include-branch-in-cache-key:
+        default: true
+        description: |
+          If true, this cache bucket will only apply to jobs within the same branch.
+        type: boolean
+      include-python-in-cache-key:
+        default: true
+        description: >
+          If true, this cache bucket will checksum the pyenv python version with the
+          cache-key.
+        type: boolean
+      no_output_timeout:
+        default: 10m
+        description: >-
+          Elapsed time the command can run without output. Passed to install
+          command.
+        type: string
+      path-args:
+        default: .
+        description: >
+          If using `pip-dist` these are the arguments after the command `pip install
+          -e` that is by default set to `.`.  Use of this parameter allows
+
+          for multiple paths to be specified.  This is important when extra paths
+          are required to install extra packages referenced via `extras_requires`.
+        type: string
+      pip-dependency-file:
+        default: requirements.txt
+        description: >
+          Name of the requirements file that needs to be installed with pip.
+          Prepended with `app-dir`. If using pipenv or poetry, this is ignored.
+
+          If using `pip-dist`, use this to use the cache checksum against the
+          `setup.py` if desired.
+
+          If `pip-dependency-file` is set to an empty string, no dependency file is
+          used in the `pip install` command.
+        type: string
+      pkg-manager:
+        default: auto
+        description: >-
+          Which package management tool to use, pipenv, pip or poetry with
+          dependency file. Use `pip-dist` to install with project setup.py.
+        enum:
+          - auto
+          - poetry
+          - pipenv
+          - pip
+          - pip-dist
+        type: enum
+      pre-install-steps:
+        default: []
+        description: |
+          Steps needed between restoring the cache and the install step.
+        type: steps
+      pypi-cache:
+        default: true
+        description: >-
+          Keep all versions of pypi and site-package caches for faster rebuilding
+          overall.
+        type: boolean
+      venv-cache:
+        default: true
+        description: >-
+          Use the lockfile to cache the virtualenv. Not used with pip as
+          pkg-manager.
+        type: boolean
+      venv-path:
+        default: ''
+        description: 'Override venv path. As json array - ex ''[ "path", "path2" ]'''
+        type: string
+    steps:
+      - run:
+          command: |-
+            # shellcheck disable=SC2016
+            echo 'if [ "${PARAM_PKG_MNGR}" = "auto" ]; then
+              if [ -f "requirements.txt" ]; then
+                  if [ -f "${PARAM_SETUP_FILE_PATH:-setup.py}" ]; then
+                      export DETECT_PKG_MNGR="pip-dist"
+                  else
+                      export DETECT_PKG_MNGR="pip"
+                  fi
+                  elif [ -f "Pipfile" ]; then
+                  export DETECT_PKG_MNGR="pipenv"
+                  export PYTHON_ENV_TOOL="pipenv"
+                  elif [ -f "pyproject.toml" ]; then
+                  export DETECT_PKG_MNGR="poetry"
+                  export PYTHON_ENV_TOOL="poetry"
+              fi
+              echo "INFO: Detected Package Manager ${DETECT_PKG_MNGR}"
+            fi' > /tmp/detect-env.sh
+            chmod +x /tmp/detect-env.sh
+            echo 'export AUTO_DETECT_ENV_SCRIPT="/tmp/detect-env.sh"' >> "$BASH_ENV"
+          name: Export automatic environment detection script
+      - run:
+          command: |-
+            if [ ! "${BASH_ENV_PYTHON_ALIASED}" ]; then
+                echo 'if [ ! $(command -v python) ]; then
+              shopt -s expand_aliases
+              alias python=python3
+              alias pip=pip3
+            fi
+
+            BASH_ENV_PYTHON_ALIASED=true' >> "$BASH_ENV"
+            fi
+          name: Alias Python
+      - when:
+          condition:
+            or:
+              - << parameters.pypi-cache >>
+              - << parameters.venv-cache >>
+          steps:
+            - run:
+                command: |-
+                  # shellcheck source=detect-env.sh
+                  source "$AUTO_DETECT_ENV_SCRIPT"
+
+                  CACHE_DIR="/tmp/cci_pycache"
+                  LOCKFILE_PATH="${CACHE_DIR}/lockfile"
+
+                  mkdir -p "${CACHE_DIR}"
+
+                  if [ ! -f "${LOCKFILE_PATH}" ]; then
+                      case ${DETECT_PKG_MNGR:-${PARAM_PKG_MNGR}} in
+                          pip | pip-dist)
+                              LOCK_FILE="${PARAM_DEPENDENCY_FILE:-requirements.txt}"
+                          ;;
+                          pipenv)
+                              LOCK_FILE="Pipfile.lock"
+                          ;;
+                          poetry)
+                              LOCK_FILE="poetry.lock"
+                          ;;
+                      esac
+                      
+                      if [ -z "${LOCK_FILE}" ]; then
+                          echo "WARNING: Could not determine lockfile path for ${DETECT_PKG_MNGR:-PARAM_PKG_MNGR}"
+                      else
+                          FULL_LOCK_FILE=$(readlink -f "${LOCK_FILE}")
+
+                          if [ -f "${LOCK_FILE}" ]; then
+                              echo "INFO: Copying ${FULL_LOCK_FILE} to ${LOCKFILE_PATH}"
+                              cp "${FULL_LOCK_FILE}" "${LOCKFILE_PATH}"
+                          else
+                              echo "WARNING: Could not find lockfile at ${LOCK_FILE}"
+                          fi
+                      fi
+                  fi
+                environment:
+                  PARAM_DEPENDENCY_FILE: << parameters.pip-dependency-file >>
+                  PARAM_PKG_MNGR: << parameters.pkg-manager >>
+                  PARAM_PYPI_CACHE: << parameters.pypi-cache >>
+                  PARAM_VENV_CACHE: << parameters.venv-cache >>
+                  PARAM_VENV_PATH: << parameters.venv-path >>
+                name: Link lockfile
+                working_directory: << parameters.app-dir >>
+            - run:
+                command: python --version | cut -d ' ' -f2 > /tmp/python-version
+                name: Save python version
+            - restore_cache:
+                keys:
+                  - >-
+                    <<parameters.cache-version>>-cci_pycache-<<#parameters.include-branch-in-cache-key>>{{
+                    .Branch }}-<</parameters.include-branch-in-cache-key>>{{
+                    checksum "/tmp/cci_pycache/lockfile"
+                    }}-<<#parameters.include-python-in-cache-key>>{{ checksum
+                    "/tmp/python-version"
+                    }}-<</parameters.include-python-in-cache-key>>
+            - run:
+                command: |-
+                  recurse() {
+                      if [ ! -d "$1" ] || [ ! -e "$2" ]; then
+                          mv -u "$1" "$2" || exit
+                          return
+                      fi
+                      for entry in "$1/"* "$1/."[!.]* "$1/.."?*; do
+                          if [ -e "$entry" ]; then
+                              recurse "$entry" "$2/${entry##"$1/"}"
+                          fi
+                      done
+                  }
+
+                  restore_paths() {
+                      if [ -d "${1}" ] && [ -n "$(ls -A "${1}" 2>/dev/null)" ]; then
+                          for file in "${1}"/*; do
+                              decoded=$(basename "${file}" | base64 -d)
+                              parent_dir=$(dirname "${decoded}")
+                              
+                              # make sure the parent directories exist
+                              if [ ! -d "${parent_dir}" ]; then
+                                  mkdir -p "${parent_dir}"
+                              fi
+                              
+                              echo "INFO: Restoring ${file} to ${decoded}"
+
+                              recurse "${file}" "${decoded}"
+                          done
+                      fi
+                  }
+
+                  CACHE_DIR="/tmp/cci_pycache"
+
+                  if [ "${PARAM_VENV_CACHE}" = "1" ]; then
+                      restore_paths "${CACHE_DIR}/venv"
+                  fi
+
+                  if [ "${PARAM_PYPI_CACHE}" = "1" ]; then
+                      restore_paths "${CACHE_DIR}/pypi"
+                  fi
+                environment:
+                  PARAM_PYPI_CACHE: << parameters.pypi-cache >>
+                  PARAM_VENV_CACHE: << parameters.venv-cache >>
+                name: Move restored cache
+                working_directory: << parameters.app-dir >>
+      - steps: <<parameters.pre-install-steps>>
+      - when:
+          condition:
+            equal:
+              - auto
+              - << parameters.pkg-manager >>
+          steps:
+            - run:
+                command: >-
+                  # shellcheck source=detect-env.sh
+
+                  source "$AUTO_DETECT_ENV_SCRIPT"
+
+
+                  case ${DETECT_PKG_MNGR:-${PARAM_PKG_MNGR}} in
+                      pip)
+                          PYTHON_INSTALL_ARGS="-r ${PARAM_DEPENDENCY_FILE:-requirements.txt}"
+                      ;;
+                      pip-dist)
+                          PYTHON_INSTALL_ARGS="-e ${PARAM_PATH_ARGS}"
+                      ;;
+                      poetry)
+                          PYTHON_INSTALL_ARGS="--no-ansi"
+                      ;;
+                  esac
+
+
+                  eval "${PYTHON_ENV_TOOL:-pip} install ${PYTHON_INSTALL_ARGS}
+                  ${PARAM_ADDITIONAL_ARGS}"
+                environment:
+                  PARAM_ADDITIONAL_ARGS: << parameters.args >>
+                  PARAM_DEPENDENCY_FILE: << parameters.pip-dependency-file >>
+                  PARAM_PATH_ARGS: << parameters.path-args >>
+                  PARAM_PKG_MNGR: << parameters.pkg-manager >>
+                name: >-
+                  Install dependencies with automatically determined project package
+                  manager
+                no_output_timeout: << parameters.no_output_timeout >>
+                working_directory: << parameters.app-dir >>
+      - when:
+          condition:
+            equal:
+              - pipenv
+              - << parameters.pkg-manager >>
+          steps:
+            - run:
+                command: |
+                  pipenv install << parameters.args >>
+                name: >-
+                  Install dependencies with pipenv using project Pipfile or inline
+                  packages
+                working_directory: << parameters.app-dir >>
+      - when:
+          condition:
+            equal:
+              - poetry
+              - << parameters.pkg-manager >>
+          steps:
+            - run:
+                command: |
+                  poetry install --no-ansi << parameters.args >>
+                name: Install dependencies with poetry using project pyproject.toml
+                working_directory: << parameters.app-dir >>
+      - when:
+          condition:
+            and:
+              - equal:
+                  - pip
+                  - << parameters.pkg-manager >>
+              - or:
+                  - <<parameters.args>>
+                  - <<parameters.pip-dependency-file>>
+          steps:
+            - run:
+                command: >
+                  pip install <<#parameters.pip-dependency-file>>-r
+                  <<parameters.pip-dependency-file>><</parameters.pip-dependency-file>>
+                  << parameters.args >>
+                name: >-
+                  Install dependencies with pip using project
+                  <<parameters.pip-dependency-file>>
+                working_directory: <<parameters.app-dir>>
+      - when:
+          condition:
+            equal:
+              - pip-dist
+              - << parameters.pkg-manager >>
+          steps:
+            - run:
+                command: |
+                  pip install -e << parameters.path-args >> << parameters.args >>
+                name: Install dependencies with pip using project setup.py
+                working_directory: <<parameters.app-dir>>
+      - when:
+          condition:
+            or:
+              - << parameters.pypi-cache >>
+              - << parameters.venv-cache >>
+          steps:
+            - run:
+                command: |-
+                  # shellcheck source=detect-env.sh
+                  source "$AUTO_DETECT_ENV_SCRIPT"
+
+                  case ${DETECT_PKG_MNGR:-${PARAM_PKG_MNGR}} in
+                      pip | pip-dist)
+                          LOCK_FILE="${PARAM_DEPENDENCY_FILE:-requirements.txt}"
+                          CACHE_PATHS='[ "/home/circleci/.cache/pip", "/home/circleci/.pyenv/versions", "/home/circleci/.local/lib" ]'
+                      ;;
+                      pipenv) # TODO: use PIPENV_PIPFILE
+                          LOCK_FILE="Pipfile.lock"
+                          PIPENV_VENV_PATH="${WORKON_HOME:-/home/circleci/.local/share/virtualenvs}"
+                          
+                          if [ -z "${PIPENV_VENV_IN_PROJECT}" ]; then
+                              VENV_PATHS="[ \"${PIPENV_VENV_PATH}\" ]"
+                          else
+                              VENV_PATHS="[ \"${CIRCLE_WORKING_DIRECTORY}/.venvs\" ]"
+                          fi
+                          
+                          CACHE_PATHS='[ "/home/circleci/.cache/pip", "/home/circleci/.cache/pipenv" ]'
+                      ;;
+                      poetry)
+                          LOCK_FILE="poetry.lock"
+                          VENV_PATHS='[ "/home/circleci/.cache/pypoetry/virtualenvs" ]'
+                          CACHE_PATHS='[ "/home/circleci/.cache/pip" ]'
+                      ;;
+                  esac
+
+                  if [ -n "${PARAM_VENV_PATH}" ]; then
+                      VENV_PATHS="${PARAM_VENV_PATH}"
+                  fi
+
+                  CACHE_DIR="/tmp/cci_pycache"
+                  mkdir -p "${CACHE_DIR}"
+
+                  link_paths() {
+                      if [ -d "${1}" ]; then
+                          echo "INFO: Cache directory already exists. Skipping..."
+                          return
+                      fi
+                      
+                      mkdir "${1}"
+                      
+                      for encoded in $(echo "${2}" | jq -r '.[] | @base64'); do
+                          decoded=$(echo "${encoded}" | base64 -d)
+                          
+                          if [ -e "${decoded}" ]; then
+                              echo "INFO: Copying ${decoded} to ${1}/${encoded}"
+                              cp -a "${decoded}" "${1}/${encoded}"
+                          else
+                              echo "INFO: Could not find ${decoded}. Skipping..."
+                          fi
+                      done
+                  }
+
+                  if [ "${PARAM_VENV_CACHE}" = "1" ] && [ -n "${VENV_PATHS}" ]; then
+                      link_paths "${CACHE_DIR}/venv" "${VENV_PATHS}"
+                  fi
+
+                  if [ "${PARAM_PYPI_CACHE}" = "1" ]; then
+                      link_paths "${CACHE_DIR}/pypi" "${CACHE_PATHS}"
+                  fi
+
+                  LOCKFILE_PATH="${CACHE_DIR}/lockfile"
+
+                  if [ -e "${LOCKFILE_PATH}" ]; then
+                      rm -f "${LOCKFILE_PATH}"
+                  fi
+
+                  if [ -e "${LOCK_FILE}" ]; then
+                      FULL_LOCK_FILE=$(readlink -f "${LOCK_FILE}")
+                      
+                      echo "INFO: Copying ${FULL_LOCK_FILE} to ${LOCKFILE_PATH}"
+                      cp "${FULL_LOCK_FILE}" "${LOCKFILE_PATH}"
+                  fi
+                environment:
+                  PARAM_DEPENDENCY_FILE: << parameters.pip-dependency-file >>
+                  PARAM_PKG_MNGR: << parameters.pkg-manager >>
+                  PARAM_PYPI_CACHE: << parameters.pypi-cache >>
+                  PARAM_VENV_CACHE: << parameters.venv-cache >>
+                  PARAM_VENV_PATH: << parameters.venv-path >>
+                name: Copy to cache directory
+                working_directory: << parameters.app-dir >>
+            - save_cache:
+                key: >-
+                  <<parameters.cache-version>>-cci_pycache-<<#parameters.include-branch-in-cache-key>>{{
+                  .Branch }}-<</parameters.include-branch-in-cache-key>>{{ checksum
+                  "/tmp/cci_pycache/lockfile"
+                  }}-<<#parameters.include-python-in-cache-key>>{{ checksum
+                  "/tmp/python-version"
+                  }}-<</parameters.include-python-in-cache-key>>
+                paths:
+                  - /tmp/cci_pycache
+
+executors:
+  default:
+    description: The official CircleCI CIMG Python Docker image.
+    docker:
+      - image: 'cimg/python:<< parameters.tag >>'
+    parameters:
+      tag:
+        default: '3.8'
+        description: The `cimg/python` Docker image version tag.
+        type: string
+
